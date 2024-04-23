@@ -1,0 +1,276 @@
+version: '3.8'
+services:
+  nginx:
+    image: nginx:latest
+    volumes:
+      - nginx-conf:/etc/nginx/conf.d
+      - ./certs:/etc/ssl
+      - nginx-logs:/var/log/nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - webnet
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 5s
+      restart_policy:
+        condition: any
+        delay: 10s
+        max_attempts: 10
+        window: 15s
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=webnet"
+        - "traefik.http.services.myrouter-01.loadbalancer.server.port=80"
+        ### Middlewares
+        # https-redir
+        - "traefik.http.middlewares.https-redir.redirectscheme.scheme=https"
+        - "traefik.http.middlewares.https-redir.redirectscheme.permanent=true"
+        # www-redir
+        - "traefik.http.middlewares.www-redir.redirectregex.regex=^https://www.(.*)"
+        - "traefik.http.middlewares.www-redir.redirectregex.replacement=https://$${1}"
+        - "traefik.http.middlewares.www-redir.redirectregex.permanent=true"
+        ### Entrypoints
+        # web
+        - "traefik.http.routers.myrouter-01.rule=Host(`example.com`, `www.example.com`)"
+        - "traefik.http.routers.myrouter-01.entrypoints=web"
+        - "traefik.http.routers.myrouter-01.middlewares=https-redir@docker"
+        # websecure
+        - "traefik.http.routers.myrouter-02.rule=Host(`example.com`, `www.example.com`)"
+        - "traefik.http.routers.myrouter-02.entrypoints=websecure"
+        - "traefik.http.routers.myrouter-02.middlewares=www-redir@docker"
+        - "traefik.http.routers.myrouter-02.tls=true"
+        - "traefik.http.routers.myrouter-02.tls.certresolver=myCloudflare"
+        - "traefik.http.routers.myrouter-02.tls.domains[0].main=example.com"
+        - "traefik.http.routers.myrouter-02.tls.domains[0].sans=*.example.com"
+
+  atlassian-bitbucket:
+    container_name: Bitbucket
+    environment:
+      - JDBC_PASSWORD={password}
+      - JDBC_URL=jdbc:mysql://localhost:3306/bitbucketdb?useUnicode=true&characterEncoding=UTF8&sessionVariables=default_storage_engine=InnoDB&autoReconnect=true&useSSL=false
+      - JDBC_USER=atlassian
+      - SERVER_PROXY_NAME=http://localhost/bitbucket
+      - SERVER_PROXY_PORT=443
+      - SERVER_SCHEME=https
+      - SERVER_SECURE=true
+    depends_on:
+      - mysql
+    healthcheck:
+      test: 'curl localhost:7990/status | grep -q RUNNING'
+      interval: 1m
+      retries: 10
+      timeout: 10s
+    image: 'atlassian/bitbucket:latest'
+    networks:
+      - webnet
+    network_mode: bridge
+    ports:
+      - '7990:7990'
+      - '7999:7999'
+    restart: unless-stopped
+    volumes:
+      - bitbucket_data:/var/atlassian/application-data/bitbucket:rw
+      - /docker/configuration/mysql-connector-java-5.1.48-bin.jar:/var/atlassian/application-data/bitbucket/lib/mysql-connector-java-5.1.48-bin.jar:rw
+
+  atlassian-confluence:
+    container_name: Confluence
+    environment:
+      - ATL_DB_DRIVER=com.mysql.jdbc.Driver
+      - ATL_DB_TYPE=mysql
+      - ATL_JDBC_PASSWORD={password}
+      - ATL_JDBC_URL=jdbc:mysql://localhost:3306/confluencedb?useUnicode=true&autoReconnect=true&useSSL=false
+      - ATL_JDBC_USER=atlassian
+      - ATL_PROXY_NAME=http://localhost/confluence
+      - ATL_PROXY_PORT=443
+      - ATL_TOMCAT_PORT=8090
+      - ATL_TOMCAT_SCHEME=https
+      - ATL_TOMCAT_SECURE=true
+    depends_on:
+      - mysql
+    healthcheck:
+      test: 'curl localhost:8090/status | grep -q RUNNING'
+      interval: 1m
+      retries: 10
+      timeout: 10s
+    image: 'atlassian/confluence:latest'
+    networks:
+      - webnet
+    network_mode: bridge
+    ports:
+      - '8090:8090'
+      - '8091:8091'
+    restart: unless-stopped
+    volumes:
+      - confluence_data:/var/atlassian/application-data/confluence:rw
+      - /docker/configuration/mysql-connector-java-8.0.21.jar:/opt/atlassian/confluence/confluence/WEB-INF/lib/mysql-connector-java-8.0.21.jar:rw
+      - confluence_logs:/opt/atlassian/confluence/logs:rw
+
+  atlassian-jira:
+    container_name: Jira
+    environment:
+      - ATL_DB_DRIVER=com.mysql.jdbc.Driver
+      - ATL_DB_TYPE=mysql
+      - ATL_JDBC_PASSWORD={password}
+      - ATL_JDBC_URL=jdbc:mysql://localhost:3306/jiradb?useUnicode=true&autoReconnect=true&useSSL=false
+      - ATL_JDBC_USER=atlassian
+      - ATL_PROXY_NAME=http://localhost/jira
+      - ATL_PROXY_PORT=443
+      - ATL_TOMCAT_PORT=8080
+      - ATL_TOMCAT_SCHEME=https
+      - ATL_TOMCAT_SECURE=true
+    depends_on:
+      - mysql
+    healthcheck:
+      test: 'curl localhost:8080/status | grep -q RUNNING'
+      interval: 1m
+      retries: 10
+      timeout: 10s
+    image: 'atlassian/jira-software:latest'
+    networks:
+      - webnet
+    network_mode: bridge
+    ports:
+      - '8080:8080'
+    restart: unless-stopped
+    volumes:
+      - jira_data:/var/atlassian/application-data/jira:rw
+      - /docker/configuration/mysql-connector-java-8.0.21.jar:/opt/atlassian/jira/lib/mysql-connector-java-8.0.21.jar:rw
+      - jira_logs:/opt/atlassian/jira/logs:rw
+
+  mysql:
+    container_name: MySQL
+    image: mariadb:10.6.4-focal
+    command: '--default-authentication-plugin=mysql_native_password'
+    volumes:
+      - db_data:/var/lib/mysql:rw
+    restart: always
+    healthcheck:
+      test: '/usr/bin/mysql --user=healthcheck --password=healthcheck --execute "SHOW DATABASES;"'
+      interval: 1m
+      retries: 1
+      timeout: 10s
+    environment:
+      - MYSQL_ROOT_PASSWORD=10092558@Sissi
+      - MYSQL_USER=jackrom
+      - MYSQL_PASSWORD=10092558@Sissi
+    ports:
+      - '3306:3306'
+    expose:
+      - 3306
+      - 33060
+    networks:
+      - webnet
+    network_mode: bridge
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 10
+        window: 15s
+      labels:
+        - "traefik.enable=false"
+
+  # phpmyadmin
+  phpmyadmin:
+    image: phpmyadmin
+    restart: always
+    environment:
+      - PMA_HOST=db
+      - PMA_USER=wordpress
+      - PMA_PASSWORD=wordpress
+    networks:
+      - webnet
+    ports:
+      - '8081:8081'
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 2
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  traefik:
+    image: traefik:2.2
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+      restart_policy:
+        condition: any
+        delay: 10s
+        max_attempts: 10
+        window: 15s
+        # ### Traefik Gui. Uncomment to get access on traefik.example.com.
+        # labels:
+        # - "traefik.enable=true"
+        # - "traefik.http.services.traefik-gui.loadbalancer.server.port=8080"
+        # - "traefik.http.routers.traefik-gui.rule=Host(`traefik.example.com`)"
+        # - "traefik.http.routers.traefik-gui.entrypoints=websecure"
+        # - "traefik.http.routers.traefik-gui.service=api@internal"
+        # - "traefik.http.routers.traefik-gui.middlewares=traefik-gui-auth"
+        # - "traefik.http.middlewares.traefik-gui-auth.basicauth.realm=MyPrivateRealm"
+        # - "traefik.http.middlewares.traefik-gui-auth.basicauth.users=admin:$$apr1$$QsWBfEvl$$kY0SCysYUjo4qQSnKGh8s." # user:admin, pass:admin
+      placement:
+        constraints:
+          - node.role == manager
+    command:
+      - "--log=true"
+      - "--log.level=info" # PANIC, FATAL, ERROR, WARN, INFO, DEBUG
+      # - "--accesslog=true"
+      - "--api.insecure=true"
+      # - "--api.debug=true"
+      - "--providers.docker=true"
+      - "--providers.docker.swarmMode=false"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls=true"
+      ## Certificate Resolver: cloudflare, type=dnsChallenge
+      - "--certificatesResolvers.myCloudflare.acme.email=juassic25@gmail.com"
+      - "--certificatesResolvers.myCloudflare.acme.storage=/data/acme.json"
+      - "--certificatesResolvers.myCloudflare.acme.caServer=https://acme-staging-v02.api.letsencrypt.org/directory" # Staging. Comment this for Production.
+      - "--certificatesResolvers.myCloudflare.acme.dnsChallenge=true"
+      - "--certificatesResolvers.myCloudflare.acme.dnsChallenge.provider=cloudflare"
+      - "--certificatesResolvers.myCloudflare.acme.dnsChallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+    environment:
+      CF_DNS_API_TOKEN: cloudflare_api_token
+    ports:
+      - published: 80
+        target: 80
+        protocol: tcp
+        mode: host
+      - published: 443
+        target: 443
+        protocol: tcp
+        mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt_data:/data
+    networks:
+      - webnet
+
+networks:
+  webnet:
+    driver: bridge
+
+volumes:
+  nginx-logs:
+  nginx-conf:
+  db_data:
+  jira_data:
+  jira_logs:
+  confluence_data:
+  confluence_logs:
+  bitbucket_data:
+  letsencrypt_data:
